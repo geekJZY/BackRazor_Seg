@@ -3,6 +3,23 @@ import torch.nn as nn
 import numpy as np
 import os 
 
+
+class logger(object):
+    def __init__(self, path, log_name="log.txt", local_rank=0):
+        self.path = path
+        self.local_rank = local_rank
+        self.log_name = log_name
+
+        if local_rank == 0:
+            os.system("mkdir -p {}".format(self.path))
+
+    def info(self, msg):
+        if self.local_rank in [0, -1]:
+            print(msg)
+            with open(os.path.join(self.path, self.log_name), 'a') as f:
+                f.write(msg + "\n")
+
+
 def denormalize(tensor, mean, std):
     mean = np.array(mean)
     std = np.array(std)

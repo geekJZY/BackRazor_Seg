@@ -1,3 +1,5 @@
+import time
+
 from tqdm import tqdm
 import network
 import utils
@@ -9,7 +11,8 @@ import numpy as np
 from torch.utils import data
 from datasets import VOCSegmentation, Cityscapes
 from utils import ext_transforms as et
-from metrics import StreamSegMetrics
+from utils.utils import logger
+from metrics import StreamSegMetrics, AverageMeter
 
 import torch
 import torch.nn as nn
@@ -18,6 +21,12 @@ from utils.visualizer import Visualizer
 from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt
+
+from network.custom_functions.masker import Masker
+from network.custom_functions.custom_conv import SparseConv2d
+from network.custom_functions.custom_sync_bn import SparseBatchNorm2d
+
+from pdb import set_trace
 
 
 def get_argparser():
@@ -79,6 +88,10 @@ def get_argparser():
                         help="epoch interval for eval (default: 100)")
     parser.add_argument("--download", action='store_true', default=False,
                         help="download datasets")
+
+    # backRazor
+    parser.add_argument("--backRazorR", type=float, default=-1,
+                        help="the backRazor prune ratio")
 
     # PASCAL VOC Options
     parser.add_argument("--year", type=str, default='2012',
@@ -208,12 +221,65 @@ def validate(opts, model, loader, device, metrics, ret_samples_ids=None):
     return score, ret_samples
 
 
+def replace_conv2d(model, **kwargs):
+    for n, module in model.named_children():
+        if len(list(module.children())) > 0:
+            ## compound module, go inside it
+            replace_conv2d(module, **kwargs)
+
+        if isinstance(module, nn.Conv2d):
+            in_channels = module.in_channels
+            out_channels = module.out_channels
+            kernel_size = module.kernel_size
+            stride = module.stride
+            padding = module.padding
+            dilation = module.dilation
+            transposed = module.transposed
+            output_padding = module.output_padding
+            groups = module.groups
+            padding_mode = module.padding_mode
+
+            new_module = SparseConv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding,
+                                      dilation=dilation, groups=groups, bias=(module.bias is not None), **kwargs)
+            new_module.load_state_dict(module.state_dict(), strict=False)
+
+            assert not transposed
+            assert padding_mode == "zeros"
+            setattr(model, n, new_module)
+
+
+def replace_BN(model, **kwargs):
+    for n, module in model.named_children():
+        if len(list(module.children())) > 0:
+            ## compound module, go inside it
+            replace_BN(module, **kwargs)
+
+        if isinstance(module, nn.BatchNorm2d):
+            num_features = module.num_features
+            eps = module.eps
+            momentum = module.momentum
+            affine = module.affine
+            track_running_stats = module.track_running_stats
+
+            new_module = SparseBatchNorm2d(num_features, eps=eps, momentum=momentum, affine=affine,
+                                           track_running_stats=track_running_stats, **kwargs)
+            new_module.load_state_dict(module.state_dict())
+
+            setattr(model, n, new_module)
+
+
 def main():
     opts = get_argparser().parse_args()
     if opts.dataset.lower() == 'voc':
         opts.num_classes = 21
     elif opts.dataset.lower() == 'cityscapes':
         opts.num_classes = 19
+
+    save_dir = 'checkpoints/%s_%s_os%d_lr%s' % (opts.model, opts.dataset, opts.output_stride, str(opts.lr))
+    if opts.backRazorR > 0:
+        save_dir = save_dir + "_backRazorR{}".format(opts.backRazorR)
+
+    log = logger(save_dir)
 
     # Setup visualization
     vis = Visualizer(port=opts.vis_port,
@@ -223,7 +289,7 @@ def main():
 
     os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("Device: %s" % device)
+    log.info("Device: %s" % device)
 
     # Setup random seed
     torch.manual_seed(opts.random_seed)
@@ -240,7 +306,7 @@ def main():
         drop_last=True)  # drop_last=True to ignore single-image batches.
     val_loader = data.DataLoader(
         val_dst, batch_size=opts.val_batch_size, shuffle=True, num_workers=2)
-    print("Dataset: %s, Train set: %d, Val set: %d" %
+    log.info("Dataset: %s, Train set: %d, Val set: %d" %
           (opts.dataset, len(train_dst), len(val_dst)))
 
     # Set up model (all models are 'constructed at network.modeling)
@@ -281,13 +347,33 @@ def main():
             "scheduler_state": scheduler.state_dict(),
             "best_score": best_score,
         }, path)
-        print("Model saved as %s" % path)
+        log.info("Model saved as %s" % path)
 
     utils.mkdir('checkpoints')
     # Restore
     best_score = 0.0
     cur_itrs = 0
     cur_epochs = 0
+
+    if opts.backRazorR > 0:
+        masker = Masker(prune_ratio=opts.backRazorR)
+        replace_conv2d(model.backbone, masker=masker)
+        replace_BN(model.backbone, masker=masker)
+
+        # for module in model.modules():
+        #     if isinstance(module, nn.BatchNorm2d):
+        #         for param in module.parameters():
+        #             param.requires_grad = False
+
+        log.info(str(model))
+
+        model_origin = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+        if opts.separable_conv and 'plus' in opts.model:
+            network.convert_to_separable_conv(model_origin.classifier)
+        utils.set_bn_momentum(model_origin.backbone, momentum=0.01)
+        model.load_state_dict(model_origin.state_dict(), strict=False)
+    # set_trace()
+
     if opts.ckpt is not None and os.path.isfile(opts.ckpt):
         # https://github.com/VainF/DeepLabV3Plus-Pytorch/issues/8#issuecomment-605601402, @PytaichukBohdan
         checkpoint = torch.load(opts.ckpt, map_location=torch.device('cpu'))
@@ -299,11 +385,11 @@ def main():
             scheduler.load_state_dict(checkpoint["scheduler_state"])
             cur_itrs = checkpoint["cur_itrs"]
             best_score = checkpoint['best_score']
-            print("Training state restored from %s" % opts.ckpt)
-        print("Model restored from %s" % opts.ckpt)
+            log.info("Training state restored from %s" % opts.ckpt)
+        log.info("Model restored from %s" % opts.ckpt)
         del checkpoint  # free memory
     else:
-        print("[!] Retrain")
+        log.info("[!] Retrain")
         model = nn.DataParallel(model)
         model.to(device)
 
@@ -316,15 +402,20 @@ def main():
         model.eval()
         val_score, ret_samples = validate(
             opts=opts, model=model, loader=val_loader, device=device, metrics=metrics, ret_samples_ids=vis_sample_id)
-        print(metrics.to_str(val_score))
+        log.info(metrics.to_str(val_score))
         return
 
     interval_loss = 0
+    time_avger = AverageMeter()
+
     while True:  # cur_itrs < opts.total_itrs:
         # =====  Train  =====
         model.train()
         cur_epochs += 1
+
+        end = time.time()
         for (images, labels) in train_loader:
+            start = time.time()
             cur_itrs += 1
 
             images = images.to(device, dtype=torch.float32)
@@ -341,25 +432,29 @@ def main():
             if vis is not None:
                 vis.vis_scalar('Loss', cur_itrs, np_loss)
 
+            time_avger.update("all", time.time() - end)
+            time_avger.update("data", start - end)
+            end = time.time()
             if (cur_itrs) % 10 == 0:
                 interval_loss = interval_loss / 10
-                print("Epoch %d, Itrs %d/%d, Loss=%f" %
-                      (cur_epochs, cur_itrs, opts.total_itrs, interval_loss))
+                log.info("Epoch %d, Itrs %d/%d, Loss=%f, Time: %f, Data Time: %f" %
+                      (cur_epochs, cur_itrs, opts.total_itrs, interval_loss,
+                       time_avger.get_results("all"), time_avger.get_results("data")))
                 interval_loss = 0.0
 
+
             if (cur_itrs) % opts.val_interval == 0:
-                save_ckpt('checkpoints/latest_%s_%s_os%d.pth' %
-                          (opts.model, opts.dataset, opts.output_stride))
-                print("validation...")
+
+                save_ckpt('%s/latest.pth' % (log.path))
+                log.info("validation...")
                 model.eval()
                 val_score, ret_samples = validate(
                     opts=opts, model=model, loader=val_loader, device=device, metrics=metrics,
                     ret_samples_ids=vis_sample_id)
-                print(metrics.to_str(val_score))
+                log.info(metrics.to_str(val_score))
                 if val_score['Mean IoU'] > best_score:  # save best model
                     best_score = val_score['Mean IoU']
-                    save_ckpt('checkpoints/best_%s_%s_os%d.pth' %
-                              (opts.model, opts.dataset, opts.output_stride))
+                    save_ckpt('%s/best.pth' % (log.path))
 
                 if vis is not None:  # visualize validation score and samples
                     vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
