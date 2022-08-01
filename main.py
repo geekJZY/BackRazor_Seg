@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from network.custom_functions.masker import Masker
 from network.custom_functions.custom_conv import SparseConv2d
 from network.custom_functions.custom_sync_bn import SparseBatchNorm2d
+from network.upernet import UperNet
 
 from pdb import set_trace
 
@@ -46,7 +47,7 @@ def get_argparser():
                               network.modeling.__dict__[name])
                               )
     parser.add_argument("--model", type=str, default='deeplabv3plus_mobilenet',
-                        choices=available_models, help='model name')
+                         help='model name')
     parser.add_argument("--separable_conv", action='store_true', default=False,
                         help="apply separable conv to decoder and aspp")
     parser.add_argument("--output_stride", type=int, default=16, choices=[8, 16])
@@ -310,19 +311,28 @@ def main():
           (opts.dataset, len(train_dst), len(val_dst)))
 
     # Set up model (all models are 'constructed at network.modeling)
-    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
-    if opts.separable_conv and 'plus' in opts.model:
-        network.convert_to_separable_conv(model.classifier)
-    utils.set_bn_momentum(model.backbone, momentum=0.01)
+    # model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+    # if opts.separable_conv and 'plus' in opts.model:
+    #     network.convert_to_separable_conv(model.classifier)
+    # utils.set_bn_momentum(model.backbone, momentum=0.01)
+
+    model = UperNet(num_classes=opts.num_classes, backbone='resnet50')
 
     # Set up metrics
     metrics = StreamSegMetrics(opts.num_classes)
 
     # Set up optimizer
-    optimizer = torch.optim.SGD(params=[
-        {'params': model.backbone.parameters(), 'lr': 0.1 * opts.lr},
-        {'params': model.classifier.parameters(), 'lr': opts.lr},
-    ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
+    if isinstance(model, UperNet):
+        optimizer = torch.optim.SGD(params=[
+            {'params': model.parameters(), 'lr': opts.lr},
+            # {'params': model.classifier.parameters(), 'lr': opts.lr},
+        ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
+    else:
+        optimizer = torch.optim.SGD(params=[
+            {'params': model.parameters(), 'lr': 0.1 * opts.lr},
+            {'params': model.classifier.parameters(), 'lr': opts.lr},
+        ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
+
     # optimizer = torch.optim.SGD(params=model.parameters(), lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
     # torch.optim.lr_scheduler.StepLR(optimizer, step_size=opts.lr_decay_step, gamma=opts.lr_decay_factor)
     if opts.lr_policy == 'poly':
@@ -357,8 +367,8 @@ def main():
 
     if opts.backRazorR > 0:
         masker = Masker(prune_ratio=opts.backRazorR)
-        replace_conv2d(model.backbone, masker=masker)
-        replace_BN(model.backbone, masker=masker)
+        replace_conv2d(model, masker=masker)
+        replace_BN(model, masker=masker)
 
         # for module in model.modules():
         #     if isinstance(module, nn.BatchNorm2d):
@@ -367,10 +377,11 @@ def main():
 
         log.info(str(model))
 
-        model_origin = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
-        if opts.separable_conv and 'plus' in opts.model:
-            network.convert_to_separable_conv(model_origin.classifier)
-        utils.set_bn_momentum(model_origin.backbone, momentum=0.01)
+        model_origin = UperNet(num_classes=opts.num_classes, backbone='resnet50')
+        # model_origin = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+        # if opts.separable_conv and 'plus' in opts.model:
+        #     network.convert_to_separable_conv(model_origin.classifier)
+        # utils.set_bn_momentum(model_origin.backbone, momentum=0.01)
         model.load_state_dict(model_origin.state_dict(), strict=False)
     # set_trace()
 

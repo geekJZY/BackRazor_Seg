@@ -1,4 +1,26 @@
+import torch
+from torch import nn
+
+from pdb import set_trace
+
+import sys
+sys.path.append(".")
+
+import argparse
+import builtins
+import torch
+from torch import nn, optim
+from torch.distributed import Backend
+from torch.nn.parallel.distributed import DistributedDataParallel
+
+from network.custom_functions.masker import Masker
+from network.custom_functions.custom_conv import SparseConv2d
+
+from torch.nn import Conv2d
+
+
 import network
+from network.upernet import UperNet
 import utils
 
 import torch
@@ -57,55 +79,74 @@ def replace_BN(model, **kwargs):
             setattr(model, n, new_module)
 
 
+def testGradDif(model1, model2):
+    max_dif = -1
+    max_dif_name = None
+
+    grad_dict_model1 = {k: v.grad for k, v in model1.named_parameters() if v.requires_grad}
+    grad_dict_model2 = {k: v.grad for k, v in model2.named_parameters() if v.requires_grad}
+
+    for name1, grad1 in grad_dict_model1.items():
+        if grad1 is not None:
+            assert grad_dict_model2[name1] is not None
+            # set_trace()
+
+        dif = torch.norm(grad1 - grad_dict_model2[name1])
+        print("grad name is {}, value is {}".format(name1, dif))
+        if dif > max_dif:
+            max_dif = dif
+            max_dif_name = name1
+
+    print("max grad name is {}, value is {}".format(max_dif_name, max_dif))
+
+
+class ConfigMemoryTest(object):
+    def __init__(self):
+        self.hidden_size = 384
+        self.quantize = False
+
+        self.transformer = dict()
+        self.transformer["attention_dropout_rate"] = 0
+        self.transformer["num_heads"] = 12
+
+        self.transformer["mlp_dim"] = 384
+        self.transformer["dropout_rate"] = 0
+
+
 def main():
-    model = network.modeling.__dict__["deeplabv3_mobilenet"](num_classes=21, output_stride=16)
+    torch.set_deterministic(True)
+    # model = network.modeling.__dict__["deeplabv3plus_resnet50"](num_classes=21, output_stride=16)
+    model = UperNet(num_classes=21)
     # network.convert_to_separable_conv(model.classifier)
-    utils.set_bn_momentum(model.backbone, momentum=0.01)
+    # utils.set_bn_momentum(model.backbone, momentum=0.01)
     model = model.cuda()
 
-    model_BR = network.modeling.__dict__["deeplabv3plus_mobilenet"](num_classes=21, output_stride=16)
+    # model_BR = network.modeling.__dict__["deeplabv3plus_resnet50"](num_classes=21, output_stride=16)
+    model_BR = UperNet(num_classes=21)
     # network.convert_to_separable_conv(model_BR.classifier)
-    utils.set_bn_momentum(model_BR.backbone, momentum=0.01)
+    # utils.set_bn_momentum(model_BR, momentum=0.01)
     masker = Masker(prune_ratio=0)
-    replace_conv2d(model_BR.backbone, masker=masker)
+    replace_conv2d(model_BR, masker=masker)
     model_BR = model_BR.cuda()
     model_BR.load_state_dict(model.state_dict(), strict=False)
 
+
     input = torch.rand(6, 3, 224, 224).cuda()
+    input.requires_grad = True
+    input2 = input.clone().detach()
+    input2.requires_grad = True
 
-    # output = model(input)
-    # output_BR = model_BR(input)
+    # model.eval()
+    model.train()
+    output = model(input)
+    output.sum().backward()
+    input_grad_ori = input.grad
 
-    # # low level feature is the same
-    # output = model.backbone.low_level_features(input)
-    # output_BR = model_BR.backbone.low_level_features(input)
-    #
-    # # low level feature 0 is the same
-    # # high level feature 0-7 is the same
-    # # high level feature is the same
-    # output = model.backbone.high_level_features[0:](output)
-    # output_BR = model_BR.backbone.high_level_features[0:](output_BR)
+    output_BR = model(input2)
+    output_BR.sum().backward()
 
-    # backbone is the same
-    output = model.backbone(input)
-    output_BR = model_BR.backbone(input)
-    #
-    for name, item in output.items():
-        print("name is {}".format(name))
-        print("item shape is {}".format(output[name].shape))
-        print("item_BR  shape is {}".format(output_BR[name].shape))
-        print("dif is {}".format(torch.norm(output[name] - output_BR[name])))
-        # print("item is {}".format(output[name].mean(-1).mean(-1).mean(-1)))
-        # print("item_BR is {}".format(output_BR[name].mean(-1).mean(-1).mean(-1)))
+    input_grad_our = input2.grad
 
-    # proj is the same
-    # output = model.classifier.project(output['low_level'])
-    # output_BR = model.classifier.project(output_BR['low_level'])
-
-    # aspp is different
-    model_BR.classifier.load_state_dict(model.classifier.state_dict())
-    output = model.classifier.aspp(output['out'])
-    output_BR = model_BR.classifier.aspp(output_BR['out'])
 
     # the bug may lie in the conv with groups > 0
     print("output shape is {}".format(output.shape))
@@ -113,8 +154,19 @@ def main():
     print("output is {}".format(output.mean(-1).mean(-1).mean(-1)))
     print("output_BR is {}".format(output_BR.mean(-1).mean(-1).mean(-1)))
 
+    print("############ prune ratio of 0 #############")
+    print("activation dist is {}".format(torch.norm(output_BR[0] - output[0])))
+    # it would be good for slightly different, custom softmax layer often introduce some difference
+    print("input grad dist is {}".format(torch.norm(input_grad_ori - input_grad_our)))
+
     set_trace()
+
+    testGradDif(model, model_BR)
 
 
 if __name__ == "__main__":
     main()
+    # testStdConv()
+    # testMlpStoreActivationPrune()
+
+# TODO: run python -m torch.distributed.launch --nproc_per_node=2 test_custom_funcs/test_sync_bn.py

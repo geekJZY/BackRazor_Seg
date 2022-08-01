@@ -173,6 +173,7 @@ class batchnorm2d(torch.autograd.Function):
 
         return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
+
 class BatchNorm2d(nn.BatchNorm2d, custom_quant.Quant):
     def __init__(self, num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, args=None, logger=None, quant_groups=1):
         super(BatchNorm2d, self).__init__(num_features, eps=eps, momentum=momentum, affine=affine, track_running_stats=track_running_stats)
