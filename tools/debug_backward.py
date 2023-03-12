@@ -114,19 +114,21 @@ class ConfigMemoryTest(object):
 
 
 def main():
-    torch.set_deterministic(True)
-    # model = network.modeling.__dict__["deeplabv3plus_resnet50"](num_classes=21, output_stride=16)
-    model = UperNet(num_classes=21)
+    model = network.modeling.__dict__["deeplabv3_resnet50"](num_classes=21, output_stride=16)
+    # model = UperNet(num_classes=21)
     # network.convert_to_separable_conv(model.classifier)
     # utils.set_bn_momentum(model.backbone, momentum=0.01)
     model = model.cuda()
+    model = model.train()
+    # model.classifier = model.classifier.eval()
 
-    # model_BR = network.modeling.__dict__["deeplabv3plus_resnet50"](num_classes=21, output_stride=16)
-    model_BR = UperNet(num_classes=21)
+    model_BR = network.modeling.__dict__["deeplabv3_resnet50"](num_classes=21, output_stride=16)
+    # model_BR = UperNet(num_classes=21)
     # network.convert_to_separable_conv(model_BR.classifier)
     # utils.set_bn_momentum(model_BR, momentum=0.01)
     masker = Masker(prune_ratio=0)
     replace_conv2d(model_BR, masker=masker)
+    replace_BN(model_BR, masker=masker)
     model_BR = model_BR.cuda()
     model_BR.load_state_dict(model.state_dict(), strict=False)
 
@@ -136,17 +138,22 @@ def main():
     input2 = input.clone().detach()
     input2.requires_grad = True
 
-    # model.eval()
-    model.train()
-    output = model(input)
+    model_BR.train()
+    # model_BR.classifier.eval()
+    # model.train()
+    # with torch.set_deterministic(True):
+    # output = model.backbone(input)["out"]
+    output = model.backbone(input)
+    output = model.classifier(output)
     output.sum().backward()
     input_grad_ori = input.grad
 
-    output_BR = model(input2)
+    # with torch.set_deterministic(True):
+    output_BR = model_BR.backbone(input2)
+    output_BR = model_BR.classifier(output_BR)
     output_BR.sum().backward()
 
     input_grad_our = input2.grad
-
 
     # the bug may lie in the conv with groups > 0
     print("output shape is {}".format(output.shape))

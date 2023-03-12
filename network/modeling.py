@@ -4,6 +4,7 @@ from .backbone import resnet
 from .backbone import mobilenetv2
 from .backbone import hrnetv2
 
+
 def _segm_hrnet(name, backbone_name, num_classes, pretrained_backbone):
 
     backbone = hrnetv2.__dict__[backbone_name](pretrained_backbone)
@@ -25,6 +26,7 @@ def _segm_hrnet(name, backbone_name, num_classes, pretrained_backbone):
     backbone = IntermediateLayerGetter(backbone, return_layers=return_layers, hrnet_flag=True)
     model = DeepLabV3(backbone, classifier)
     return model
+
 
 def _segm_resnet(name, backbone_name, num_classes, output_stride, pretrained_backbone):
 
@@ -81,6 +83,7 @@ def _segm_mobilenet(name, backbone_name, num_classes, output_stride, pretrained_
     model = DeepLabV3(backbone, classifier)
     return model
 
+
 def _load_model(arch_type, backbone, num_classes, output_stride, pretrained_backbone):
 
     if backbone=='mobilenetv2':
@@ -98,8 +101,10 @@ def _load_model(arch_type, backbone, num_classes, output_stride, pretrained_back
 def deeplabv3_hrnetv2_48(num_classes=21, output_stride=4, pretrained_backbone=False): # no pretrained backbone yet
     return _load_model('deeplabv3', 'hrnetv2_48', output_stride, num_classes, pretrained_backbone=pretrained_backbone)
 
+
 def deeplabv3_hrnetv2_32(num_classes=21, output_stride=4, pretrained_backbone=True):
     return _load_model('deeplabv3', 'hrnetv2_32', output_stride, num_classes, pretrained_backbone=pretrained_backbone)
+
 
 def deeplabv3_resnet50(num_classes=21, output_stride=8, pretrained_backbone=True):
     """Constructs a DeepLabV3 model with a ResNet-50 backbone.
@@ -111,6 +116,7 @@ def deeplabv3_resnet50(num_classes=21, output_stride=8, pretrained_backbone=True
     """
     return _load_model('deeplabv3', 'resnet50', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone)
 
+
 def deeplabv3_resnet101(num_classes=21, output_stride=8, pretrained_backbone=True):
     """Constructs a DeepLabV3 model with a ResNet-101 backbone.
 
@@ -120,6 +126,7 @@ def deeplabv3_resnet101(num_classes=21, output_stride=8, pretrained_backbone=Tru
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
     return _load_model('deeplabv3', 'resnet101', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone)
+
 
 def deeplabv3_mobilenet(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3 model with a MobileNetv2 backbone.
@@ -136,8 +143,10 @@ def deeplabv3_mobilenet(num_classes=21, output_stride=8, pretrained_backbone=Tru
 def deeplabv3plus_hrnetv2_48(num_classes=21, output_stride=4, pretrained_backbone=False): # no pretrained backbone yet
     return _load_model('deeplabv3plus', 'hrnetv2_48', num_classes, output_stride, pretrained_backbone=pretrained_backbone)
 
+
 def deeplabv3plus_hrnetv2_32(num_classes=21, output_stride=4, pretrained_backbone=True):
     return _load_model('deeplabv3plus', 'hrnetv2_32', num_classes, output_stride, pretrained_backbone=pretrained_backbone)
+
 
 def deeplabv3plus_resnet50(num_classes=21, output_stride=8, pretrained_backbone=True):
     """Constructs a DeepLabV3 model with a ResNet-50 backbone.
@@ -170,3 +179,4 @@ def deeplabv3plus_mobilenet(num_classes=21, output_stride=8, pretrained_backbone
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
     return _load_model('deeplabv3plus', 'mobilenetv2', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone)
+

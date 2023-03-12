@@ -27,6 +27,8 @@ from network.custom_functions.custom_conv import SparseConv2d
 from network.custom_functions.custom_sync_bn import SparseBatchNorm2d
 from network.upernet import UperNet
 
+from tools.memory_cost_profiler import profile_memory_cost
+
 from pdb import set_trace
 
 
@@ -107,6 +109,10 @@ def get_argparser():
                         help='env for visdom')
     parser.add_argument("--vis_num_samples", type=int, default=8,
                         help='number of samples for visualization (default: 8)')
+
+    parser.add_argument("--name_append", type=str, default="",
+                        help='name_append')
+
     return parser
 
 
@@ -269,6 +275,17 @@ def replace_BN(model, **kwargs):
             setattr(model, n, new_module)
 
 
+def replace_relu(model, **kwargs):
+    for n, module in model.named_children():
+        if len(list(module.children())) > 0:
+            ## compound module, go inside it
+            replace_relu(module, **kwargs)
+
+        if isinstance(module, nn.ReLU):
+            new_module = nn.ReLU()
+            setattr(model, n, new_module)
+
+
 def main():
     opts = get_argparser().parse_args()
     if opts.dataset.lower() == 'voc':
@@ -279,6 +296,8 @@ def main():
     save_dir = 'checkpoints/%s_%s_os%d_lr%s' % (opts.model, opts.dataset, opts.output_stride, str(opts.lr))
     if opts.backRazorR > 0:
         save_dir = save_dir + "_backRazorR{}".format(opts.backRazorR)
+    if opts.name_append != "":
+        save_dir = save_dir + "_{}".format(opts.name_append)
 
     log = logger(save_dir)
 
@@ -288,7 +307,7 @@ def main():
     if vis is not None:  # display options
         vis.vis_table("Options", vars(opts))
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
+    # os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log.info("Device: %s" % device)
 
@@ -311,12 +330,33 @@ def main():
           (opts.dataset, len(train_dst), len(val_dst)))
 
     # Set up model (all models are 'constructed at network.modeling)
-    # model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
-    # if opts.separable_conv and 'plus' in opts.model:
-    #     network.convert_to_separable_conv(model.classifier)
-    # utils.set_bn_momentum(model.backbone, momentum=0.01)
+    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+    if opts.separable_conv and 'plus' in opts.model:
+        network.convert_to_separable_conv(model.classifier)
+    utils.set_bn_momentum(model.backbone, momentum=0.01)
 
-    model = UperNet(num_classes=opts.num_classes, backbone='resnet50')
+    if opts.backRazorR > 0:
+        masker = Masker(prune_ratio=opts.backRazorR)
+        replace_conv2d(model.backbone, masker=masker)
+        replace_BN(model.backbone, masker=masker)
+        # current code is not compatible with in place relu
+
+        # for module in model.modules():
+        #     if isinstance(module, nn.BatchNorm2d):
+        #         for param in module.parameters():
+        #             param.requires_grad = False
+
+        log.info(str(model))
+
+        # model_origin = UperNet(num_classes=opts.num_classes, backbone='resnet50')
+        model_origin = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+        if opts.separable_conv and 'plus' in opts.model:
+            network.convert_to_separable_conv(model_origin.classifier)
+        utils.set_bn_momentum(model_origin.backbone, momentum=0.01)
+        model.load_state_dict(model_origin.state_dict(), strict=False)
+    # set_trace()
+
+    # model = UperNet(num_classes=opts.num_classes, backbone='resnet50')
 
     # Set up metrics
     metrics = StreamSegMetrics(opts.num_classes)
@@ -329,7 +369,7 @@ def main():
         ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
     else:
         optimizer = torch.optim.SGD(params=[
-            {'params': model.parameters(), 'lr': 0.1 * opts.lr},
+            {'params': model.backbone.parameters(), 'lr': 0.1 * opts.lr},
             {'params': model.classifier.parameters(), 'lr': opts.lr},
         ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
 
@@ -365,31 +405,11 @@ def main():
     cur_itrs = 0
     cur_epochs = 0
 
-    if opts.backRazorR > 0:
-        masker = Masker(prune_ratio=opts.backRazorR)
-        replace_conv2d(model, masker=masker)
-        replace_BN(model, masker=masker)
-
-        # for module in model.modules():
-        #     if isinstance(module, nn.BatchNorm2d):
-        #         for param in module.parameters():
-        #             param.requires_grad = False
-
-        log.info(str(model))
-
-        model_origin = UperNet(num_classes=opts.num_classes, backbone='resnet50')
-        # model_origin = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
-        # if opts.separable_conv and 'plus' in opts.model:
-        #     network.convert_to_separable_conv(model_origin.classifier)
-        # utils.set_bn_momentum(model_origin.backbone, momentum=0.01)
-        model.load_state_dict(model_origin.state_dict(), strict=False)
-    # set_trace()
-
     if opts.ckpt is not None and os.path.isfile(opts.ckpt):
         # https://github.com/VainF/DeepLabV3Plus-Pytorch/issues/8#issuecomment-605601402, @PytaichukBohdan
         checkpoint = torch.load(opts.ckpt, map_location=torch.device('cpu'))
         model.load_state_dict(checkpoint["model_state"])
-        model = nn.DataParallel(model)
+        # model = nn.DataParallel(model)
         model.to(device)
         if opts.continue_training:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -401,7 +421,7 @@ def main():
         del checkpoint  # free memory
     else:
         log.info("[!] Retrain")
-        model = nn.DataParallel(model)
+        # model = nn.DataParallel(model)
         model.to(device)
 
     # ==========   Train Loop   ==========#
@@ -418,6 +438,14 @@ def main():
 
     interval_loss = 0
     time_avger = AverageMeter()
+
+    activation_bits = 32
+    memory_cost, memory_cost_dict = profile_memory_cost(model, input_size=(1, 3, 224, 224), require_backward=True,
+                                                        activation_bits=activation_bits, trainable_param_bits=32,
+                                                        frozen_param_bits=8, batch_size=128)
+    MB = 1024 * 1024
+    log.info("memory_cost is {:.1f} MB, param size is {:.1f} MB, act_size each sample is {:.1f} MB".
+             format(memory_cost / MB, memory_cost_dict["param_size"] / MB, memory_cost_dict["act_size"] / MB))
 
     while True:  # cur_itrs < opts.total_itrs:
         # =====  Train  =====
@@ -446,13 +474,13 @@ def main():
             time_avger.update("all", time.time() - end)
             time_avger.update("data", start - end)
             end = time.time()
-            if (cur_itrs) % 10 == 0:
-                interval_loss = interval_loss / 10
+            interval_len = 10
+            if (cur_itrs) % interval_len == 0:
+                interval_loss = interval_loss / interval_len
                 log.info("Epoch %d, Itrs %d/%d, Loss=%f, Time: %f, Data Time: %f" %
                       (cur_epochs, cur_itrs, opts.total_itrs, interval_loss,
                        time_avger.get_results("all"), time_avger.get_results("data")))
                 interval_loss = 0.0
-
 
             if (cur_itrs) % opts.val_interval == 0:
 

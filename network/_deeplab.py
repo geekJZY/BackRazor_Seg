@@ -129,6 +129,7 @@ class ASPPPooling(nn.Sequential):
         size = x.shape[-2:]
         x = super(ASPPPooling, self).forward(x)
         return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+        # return F.interpolate(x, size=size, mode='nearest')
 
 class ASPP(nn.Module):
     def __init__(self, in_channels, atrous_rates):
@@ -152,7 +153,7 @@ class ASPP(nn.Module):
             nn.Conv2d(5 * out_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.1),)
+            nn.Dropout(0.0),)
 
     def forward(self, x):
         res = []
