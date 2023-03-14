@@ -307,7 +307,7 @@ def main():
     if vis is not None:  # display options
         vis.vis_table("Options", vars(opts))
 
-    # os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
+    os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log.info("Device: %s" % device)
 
@@ -392,7 +392,7 @@ def main():
         """
         torch.save({
             "cur_itrs": cur_itrs,
-            "model_state": model.module.state_dict(),
+            "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
             "best_score": best_score,
